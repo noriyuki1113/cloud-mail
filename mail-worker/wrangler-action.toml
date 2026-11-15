@@ -38,13 +38,14 @@ run_worker_first = true
 crons = ["0 * * * *"]	#每小时执行；resetDaySendCount 仅在 UTC 0 点生效
 
 
+# jwt_secret is NOT a plain variable. It is a Secret binding uploaded with `wrangler deploy --secrets-file`
+# by .github/workflows/deploy-cloudflare.yml (the app reads it as env.jwt_secret).
 [vars]
 ai_model = "${AI_MODEL}"
 analysis_cache = "${ANALYSIS_CACHE}"
 #orm_log = false
 domain = "${DOMAIN}"
 admin = "${ADMIN}"
-jwt_secret = "${JWT_SECRET}"
 project_link = "${PROJECT_LINK}"
 
 [build]

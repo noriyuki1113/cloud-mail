@@ -1,25 +1,41 @@
-name: 🚀 Deploy cloud-mail to Cloudflare Workers
+name: 🚀 Deploy cloud-mail to Cloudflare Workers (manual)
 
+# Production deploys are MANUAL ONLY. There is deliberately no push/pull_request trigger: merging to main
+# never deploys. Run it from Actions → "Run workflow" on the main branch and type the confirmation word.
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - "mail-worker/**"
-      - "mail-vue/**"
   workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "deploy-production" to confirm a production deploy'
+        required: true
+        type: string
+      create_missing_resources:
+        description: 'Create the D1 database / KV namespace if they do not exist yet (default: fail instead of creating a duplicate)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-cloud-mail
+  cancel-in-progress: false
 
 jobs:
   Deploy-cloud-mail:
     name: 🏗️ Build and Deploy
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.ref == 'refs/heads/main' && inputs.confirm == 'deploy-production'
 
+    # Only NON-secret settings live at job level. JWT_SECRET and CLOUDFLARE_API_TOKEN are attached to the
+    # individual steps that need them (never to dependency installs or third-party actions).
     env:
       NAME: ${{ secrets.NAME || vars.NAME || 'cloud-mail' }}
       CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN || vars.CUSTOM_DOMAIN }}
       DOMAIN: ${{ secrets.DOMAIN || vars.DOMAIN }}
       ADMIN: ${{ secrets.ADMIN || vars.ADMIN }}
-      JWT_SECRET: ${{ secrets.JWT_SECRET || vars.JWT_SECRET }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || vars.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || vars.CLOUDFLARE_ACCOUNT_ID }}
       D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID || vars.D1_DATABASE_ID }}
       KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID || vars.KV_NAMESPACE_ID }}
@@ -28,7 +44,7 @@ jobs:
       AI_MODEL: ${{ secrets.AI_MODEL || vars.AI_MODEL || '@cf/meta/llama-3.1-8b-instruct-fast' }}
       EMAIL: ${{ secrets.EMAIL || vars.EMAIL }}
       ANALYSIS_CACHE: ${{ secrets.ANALYSIS_CACHE || vars.ANALYSIS_CACHE || false }}
-
+      CREATE_MISSING: ${{ inputs.create_missing_resources }}
 
     outputs:
       worker_url: ${{ steps.deploy.outputs.worker_url }}
@@ -60,14 +76,11 @@ jobs:
 
       - name: 🛠️ Set up environment
         working-directory: ./mail-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           
           echo "🔐 Starting environment setup..."
-          
-          if [ -z "$JWT_SECRET" ] || grep -q '[?%#/\\]' <<< "$JWT_SECRET"; then
-            echo "❌ JWT_SECRET variable is empty or contains invalid characters (?, %, #, /, \\)."
-            exit 1
-          fi
           
           if ! jq -e 'type == "array"' <<< "$DOMAIN" ; then
             echo "❌ DOMAIN variable must be a JSON array (e.g., [\"example.com\"])."
@@ -91,6 +104,19 @@ jobs:
           
           if [ -z "$CUSTOM_DOMAIN" ]; then
             echo "::warning:: CUSTOM_DOMAIN variable is not set."
+          else
+            # A bare sub-domain only (e.g. mail.example.com). The apex / www of an existing site must never be
+            # claimed by this Worker (a custom_domain route would take that hostname over).
+            if ! grep -Eq '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?){2,}$' <<< "$CUSTOM_DOMAIN"; then
+              echo "❌ CUSTOM_DOMAIN must be a sub-domain host name such as mail.example.com (no scheme, path or port)."
+              exit 1
+            fi
+            case "$CUSTOM_DOMAIN" in
+              muselora.jp|www.muselora.jp)
+                echo "❌ CUSTOM_DOMAIN must not be the apex or www host of the existing site."
+                exit 1 ;;
+            esac
+            echo "ℹ️ Admin domain: $CUSTOM_DOMAIN"
           fi
           
           CONFIG_FILE="wrangler-action.toml"
@@ -119,7 +145,6 @@ jobs:
           sed -i "s|\${CUSTOM_DOMAIN}|${CUSTOM_DOMAIN}|g" "$CONFIG_FILE"
           sed -i "s|\"\${DOMAIN}\"|${DOMAIN}|g" "$CONFIG_FILE"
           sed -i "s|\${ADMIN}|${ADMIN}|g" "$CONFIG_FILE"
-          sed -i "s|\${JWT_SECRET}|${JWT_SECRET}|g" "$CONFIG_FILE"
           sed -i "s|\${R2_BUCKET_NAME}|${R2_BUCKET_NAME}|g" "$CONFIG_FILE"
           sed -i "s|\${PROJECT_LINK}|${PROJECT_LINK}|g" "$CONFIG_FILE"
           sed -i "s|\${ANALYSIS_CACHE}|${ANALYSIS_CACHE}|g" "$CONFIG_FILE"
@@ -132,6 +157,8 @@ jobs:
 
       - name: ⚡ Set up KV database
         working-directory: ./mail-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           
           CONFIG_FILE="wrangler-action.toml"
@@ -159,7 +186,12 @@ jobs:
             KV_ID=$(echo "$KV_LIST" | jq -r ".[] | select(.title == \"$NAME\") | .id")
             echo "KV_NAMESPACE_ID: $KV_ID"
           else
-            echo "⚠️ Database $NAME does not exist. Starting creation..."
+            if [ "$CREATE_MISSING" != "true" ]; then
+              echo "❌ KV namespace '$NAME' was not found. Set the KV_NAMESPACE_ID variable to the existing namespace id,"
+              echo "   or re-run with 'create_missing_resources' enabled to create a new one."
+              exit 1
+            fi
+            echo "⚠️ KV namespace $NAME does not exist. Creating it (create_missing_resources=true)..."
             pnpm wrangler kv namespace create $NAME
             KV_LIST=$(pnpm wrangler kv namespace list)
             KV_ID=$(echo "$KV_LIST" | jq -r ".[] | select(.title == \"$NAME\") | .id")
@@ -170,6 +202,8 @@ jobs:
 
       - name: 🐬 Set up D1 database
         working-directory: ./mail-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
           
           CONFIG_FILE="wrangler-action.toml"
@@ -197,7 +231,12 @@ jobs:
             D1_ID=$(echo "$DB_LIST" | jq -r ".[] | select(.name == \"$NAME\") | .uuid")
             echo "D1_DATABASE_ID: $D1_ID"
           else
-            echo "⚠️ Database $NAME does not exist. Starting creation..."
+            if [ "$CREATE_MISSING" != "true" ]; then
+              echo "❌ D1 database '$NAME' was not found. Set the D1_DATABASE_ID variable to the existing database id,"
+              echo "   or re-run with 'create_missing_resources' enabled to create a new one."
+              exit 1
+            fi
+            echo "⚠️ D1 database $NAME does not exist. Creating it (create_missing_resources=true)..."
             pnpm wrangler d1 create $NAME
             DB_LIST=$(pnpm wrangler d1 list --json)
             D1_ID=$(echo "$DB_LIST" | jq -r ".[] | select(.name == \"$NAME\") | .uuid")
@@ -206,57 +245,111 @@ jobs:
           sed -i "s|\${D1_DATABASE_ID}|$D1_ID|g" "$CONFIG_FILE"
           echo "✅ Setup completed."
 
+      - name: 🔐 Prepare secrets file
+        env:
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+        run: |
+          # The JWT secret reaches Cloudflare as a Secret binding (wrangler deploy --secrets-file), never as a
+          # plain [vars] entry and never through the generated wrangler config.
+          if [ -z "$JWT_SECRET" ]; then
+            echo "❌ The JWT_SECRET repository secret is empty or not set."
+            exit 1
+          fi
+          if [ "${#JWT_SECRET}" -lt 32 ]; then
+            echo "❌ JWT_SECRET must be at least 32 characters long."
+            exit 1
+          fi
+          if [[ "$JWT_SECRET" == *$'\n'* || "$JWT_SECRET" == *$'\r'* ]]; then
+            echo "❌ JWT_SECRET must not contain line breaks."
+            exit 1
+          fi
+
+          umask 077                                   # owner-only permissions from the first byte
+          SECRETS_FILE="$(mktemp "$RUNNER_TEMP/cloud-mail-secrets.XXXXXXXX")"
+          chmod 600 "$SECRETS_FILE"
+          # JSON keeps the value literal ($ and quotes are not interpreted). jq reads it from the environment,
+          # so it never appears on a command line.
+          jq -n '{jwt_secret: env.JWT_SECRET}' > "$SECRETS_FILE"
+          echo "SECRETS_FILE=$SECRETS_FILE" >> "$GITHUB_ENV"
+          echo "✅ Secrets file prepared (permissions 600, contents not shown)."
+
       - name: 🚀 Start deployment
         id: deploy
         working-directory: ./mail-worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: |
+          trap 'rm -f "$SECRETS_FILE"' EXIT           # removed even if the deploy fails
+
           echo "🚀 Starting deployment..."
-          pnpm wrangler deploy -c wrangler-action.toml 2>&1 \
-            | tee deploy.log \
-            | grep -v "https://.*\.workers\.dev" \
-            | sed -E 's/env\.domain .*/env.domain (***)/' \
-            || true
-          
-          DEPLOY_EXIT_CODE=${PIPESTATUS[0]}
+          set +e
+          pnpm wrangler deploy -c wrangler-action.toml --secrets-file "$SECRETS_FILE" > deploy.log 2>&1
+          DEPLOY_EXIT_CODE=$?
+          set -e
+
+          # Show the log without the worker URL and the domain value.
+          grep -v "https://.*\.workers\.dev" deploy.log | sed -E 's/env\.domain .*/env.domain (***)/' || true
+
           if [ $DEPLOY_EXIT_CODE -ne 0 ]; then
+            echo "❌ Deployment failed (exit code $DEPLOY_EXIT_CODE)."
             exit 1
           fi
-          
-          WORKER_URL=$(grep -o "https://.*\.workers\.dev" deploy.log || echo "")
-          
+
+          WORKER_URL=$(grep -o "https://[^ ]*\.workers\.dev" deploy.log | head -n 1 || true)
+
           if [ -n "$WORKER_URL" ]; then
             echo "::add-mask::$WORKER_URL"
           fi
-          
+
           echo "worker_url=$WORKER_URL" >> $GITHUB_OUTPUT
-          echo "✅ Setup completed."
+          echo "✅ Deployment completed."
 
       - name: ♻️ Initialize database
+        env:
+          JWT_SECRET: ${{ secrets.JWT_SECRET }}
+          DEPLOYED_URL: ${{ steps.deploy.outputs.worker_url }}
         run: |
           echo "🛠️ Starting database initialization..."
+
+          BASE_URL="${CUSTOM_DOMAIN:+https://$CUSTOM_DOMAIN}"
+          BASE_URL="${BASE_URL:-$DEPLOYED_URL}"
+
+          if [ -z "$BASE_URL" ]; then
+            echo "❌ Worker URL not available. Please set CUSTOM_DOMAIN."
+            exit 1
+          fi
+
+          # POST + Authorization header. The secret is passed to curl on STDIN as a config line, so it is not in
+          # the URL, the argument list or the logs. No redirects are followed (the header must not be forwarded).
+          ESCAPED="${JWT_SECRET//\\/\\\\}"
+          ESCAPED="${ESCAPED//\"/\\\"}"
           sleep 15
-          
-          WORKER_URL="${CUSTOM_DOMAIN:+https://$CUSTOM_DOMAIN}"
-          WORKER_URL="${WORKER_URL:-${{ steps.deploy.outputs.worker_url }}}"
-          
-          if [ -z "$WORKER_URL" ]; then
-            echo "❌ Preview URL not available. Please set CUSTOM_DOMAIN."
-            exit 1
-          fi
-          
-          HTTP_CODE=$(curl -sL -w "%{http_code}" -o response.txt "$WORKER_URL/api/init/${JWT_SECRET}")
-          RESPONSE_BODY=$(cat response.txt)
+          for ATTEMPT in 1 2 3 4 5 6; do
+            HTTP_CODE=$(printf 'header = "Authorization: Bearer %s"\n' "$ESCAPED" \
+              | curl -sS -K - --proto '=https' --max-redirs 0 --max-time 60 \
+                  --request POST --data '' -o response.txt -w '%{http_code}' "$BASE_URL/api/init" 2>/dev/null || true)
+            if [ "$HTTP_CODE" = "200" ] && [ "$(cat response.txt)" = "success" ]; then
+              echo "✅ Initialization completed."
+              rm -f response.txt
+              exit 0
+            fi
+            if [ "$HTTP_CODE" = "401" ]; then
+              echo "❌ HTTP 401: the init endpoint rejected the credentials (jwt_secret binding missing or different)."
+              rm -f response.txt
+              exit 1
+            fi
+            echo "⏳ Attempt $ATTEMPT/6: HTTP ${HTTP_CODE:-000}; retrying in 10 s..."
+            sleep 10
+          done
+          echo "❌ Initialization failed after 6 attempts (last HTTP ${HTTP_CODE:-000})."
+          head -c 200 response.txt 2>/dev/null || true
+          rm -f response.txt
+          exit 1
 
-          if [ "$RESPONSE_BODY" = "success" ]; then
-            echo "✅ Setup completed."
-          else
-            echo "❌ Failed. HTTP: $HTTP_CODE, Response: $RESPONSE_BODY"
-            exit 1
+      - name: 🧹 Remove secrets file
+        if: always()
+        run: |
+          if [ -n "${SECRETS_FILE:-}" ] && [ -e "$SECRETS_FILE" ]; then
+            shred -u "$SECRETS_FILE" 2>/dev/null || rm -f "$SECRETS_FILE"
           fi
-
-      - name: 🗑️ Delete workflow runs
-        uses: GitRML/delete-workflow-runs@main
-        continue-on-error: true
-        with:
-          retain_days: '1'
-          keep_minimum_runs: '0'
+          echo "✅ No secrets file left on the runner."
