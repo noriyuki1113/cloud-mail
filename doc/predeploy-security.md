@@ -6,7 +6,8 @@
 | `JWT_SECRET` | GitHub **Secret** | ワークフローが一時ファイル（権限 600）に JSON で書き、`wrangler deploy --secrets-file` で Cloudflare の **Secret binding `jwt_secret`** として登録。`[vars]` や設定ファイルには入れない。ファイルは成功・失敗・キャンセルのいずれでも削除 |
 | `CLOUDFLARE_API_TOKEN` | GitHub **Secret** | Wrangler を使うステップにだけ渡す（依存のインストールや第三者アクションには渡さない） |
 | `CUSTOM_DOMAIN`、`DOMAIN`、`ADMIN`、`CLOUDFLARE_ACCOUNT_ID` | GitHub Variables | 公開してよい設定値。`CUSTOM_DOMAIN` は `mail.muselora.jp`（`muselora.jp` と `www` は拒否） |
-| `D1_DATABASE_ID`、`KV_NAMESPACE_ID` | GitHub Variables（任意だが**推奨**） | 既存のリソースを ID で指定。未設定で名前の検索にも無い場合は、**作成せずに失敗**（`create_missing_resources` を有効にした場合だけ作成） |
+| `D1_DATABASE_NAME`（任意） | GitHub Variable | 既存の D1 名。**未設定なら `muselora-mail`**（既存を名前で検索して再利用する） |
+| `D1_DATABASE_ID`、`KV_NAMESPACE_ID`（任意） | GitHub Variables | 既存のリソースを ID で指定。**指定した ID は、アカウント内に実在するか確認する**（D1 は名前の ID と食い違えば失敗）。未設定で名前の検索にも無い場合は、**作成せずに失敗**（`create_missing_resources` を有効にした場合だけ作成）。KV は名前（`NAME`、既定 `cloud-mail`）で検索 |
 
 アプリは従来どおり `env.jwt_secret` を参照します（バインディング名は変更なし）。
 
@@ -40,3 +41,30 @@
 
 ## 秘密鍵を入れ替える（ローテーション）
 過去に `GET /api/init/<秘密鍵>` を実際に呼んだことがある場合、その鍵は URL としてログに残っている可能性があります。新しい 32 文字以上の鍵を作って GitHub Secret を更新し、再度デプロイしてください（Secret binding は `--secrets-file` で上書きされます）。JWT を入れ替えると、既存のログイン状態は無効になります。
+
+## フロントエンドのビルドとデプロイ（最終準備）
+- ビルドは専用ステップ「Build front end (no credentials)」で行う。**Cloudflare のトークンも JWT_SECRET も付かない**（依存パッケージのインストールスクリプトに見せない）。出力は `mail-worker/dist`（`mail-vue/.env.release` の `VITE_OUT_DIR`）。
+- デプロイ用の設定（`wrangler-action.toml`）には `[build]` を置かない。`wrangler deploy` は再ビルドせず、`dist` をアップロードするだけ。ワークフローは `[build]` が混ざると失敗する。
+- コマンドは `pnpm -C ./mail-vue …`（`--prefix` は pnpm では効かない）。
+
+## 管理者アカウントと新規登録
+- **管理者**は、`ADMIN` と同じメールアドレスのアカウント（全権限）。
+- 新規データベースでは**公開の新規登録は閉じた状態**から始まる（`setting.register = 1`）。管理者が設定画面で開くまで、誰も登録できない。開く場合は、登録の認証（Turnstile）と登録キーも併せて設定すること。
+- **管理者アドレスは、公開の登録画面では作れない**（登録が開いていても、OAuth でも）。作成には、デプロイの秘密鍵を `Authorization: Bearer` で付けた登録リクエストが必要。**初回の1回だけ**、手元で実行する：
+  ```bash
+  read -rs -p 'JWT_SECRET: ' JWT_SECRET; echo      # 記号は " と \ を含まない値を推奨
+  read -rs -p '管理者のパスワード（12文字以上）: ' P; echo
+  E='admin@muselora.jp' P="$P" jq -n '{email: env.E, password: env.P}' \
+    | curl -sS -K <(printf 'header = "Authorization: Bearer %s"\nheader = "Content-Type: application/json"\n' "$JWT_SECRET") \
+        --data @- https://mail.muselora.jp/api/register
+  ```
+  `/api/init` の直後に実行すること（それまで、管理者アドレスは誰も取得できないが、早く確定させる）。ブラウザの登録画面からは作れない。
+- 管理系の API（設定、ユーザー、ロール、登録キー、全メールなど）は、ログインしていなければ 401。公開 API（`/public/*`）は、管理者が発行した公開トークンが無ければ使えない（未発行なら常に拒否）。
+
+## R2 を使わない場合（`R2_BUCKET_NAME` 未設定）
+- R2 の設定は外れ、**添付ファイルと画像は KV に保存**される（KV は1値あたり 25 MiB まで。無料プランは書き込みが1日 1,000 回まで）。受信自体は止まらず、添付の保存に失敗しても本文は受信される（ログに残る）。
+- 大きな添付や多数のメールを受ける場合は、R2 のバケットを作成し、`R2_BUCKET_NAME` を設定する（バケットの作成は別途承認）。
+
+## 依存パッケージの状況（`pnpm audit --prod`）
+- `hono` を 4.12.16 → **4.13.18** に更新（ルーターがワイルドカードのミドルウェア＝認証を飛ばす不具合などの修正。`app.use('*')` の認証に関わる）。
+- 残る指摘の主なもの：`drizzle-orm`（識別子のエスケープ。`sql.identifier` は使っておらず、ユーザー入力は束縛変数のため、このコードでは到達しない）、`fast-xml-parser`（`@aws-sdk/client-s3` 経由。S3 を使う場合のみ）、フロントエンドの `axios` など。**ワーカーへバンドルされない開発用（vite プラグイン、miniflare）の指摘も含む**。次の更新で対応を検討。

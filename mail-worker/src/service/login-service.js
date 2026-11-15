@@ -19,6 +19,7 @@ import dayjs from 'dayjs';
 import { toUtc } from '../utils/date-uitil';
 import { t } from '../i18n/i18n.js';
 import verifyRecordService from './verify-record-service';
+import { bearerToken, secretMatches } from '../utils/secret-utils';
 
 const loginService = {
 
@@ -33,7 +34,19 @@ const loginService = {
 			register = settingConst.register.OPEN;
 		}
 
-		if (register === settingConst.register.CLOSE) {
+		// The administrator is whoever owns the configured ADMIN e-mail address. Nobody may claim it through the
+		// public sign-up (open or closed, password or OAuth): creating that account needs the deployment secret
+		// as "Authorization: Bearer <jwt_secret>" — see doc/predeploy-security.md (one-time bootstrap).
+		let adminBootstrap = false;
+		const adminEmail = c.env.admin;
+		if (typeof email === 'string' && typeof adminEmail === 'string' && adminEmail && email.trim().toLowerCase() === adminEmail.trim().toLowerCase()) {
+			adminBootstrap = !oauth && await secretMatches(bearerToken(c.req.header('authorization')), c.env.jwt_secret);
+			if (!adminBootstrap) {
+				throw new BizError(t('unauthorized'), 403);
+			}
+		}
+
+		if (register === settingConst.register.CLOSE && !adminBootstrap) {
 			throw new BizError(t('regDisabled'));
 		}
 
