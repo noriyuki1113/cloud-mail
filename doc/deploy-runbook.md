@@ -89,20 +89,22 @@ PR #2 は Draft のままで、`main` が `de05033`、PR の先端が `04985fa` 
 | TXT（DKIM） | `cf2024-1._domainkey.muselora.jp` |
 
 **影響と注意**
-- **すでに別の MX（Google Workspace など）がある場合は、Email Routing と同時には使えません**（既存の MX を消す必要がある）。このアカウントの DNS は、私の権限では読めないため、**未確認**。**先に、あなたが DNS 画面で `muselora.jp` の MX と TXT（SPF）が無いことを確認**してください（手順は `docs/release/minimal-public-prep.md`、art-atlas-japan）。
+- **公開 DNS への問い合わせ（2026-11-15）で確認：`muselora.jp` に MX も SPF の TXT もない**（既存のメールサービスはない）。したがって、有効化しても、**既存のメールへの影響はありません**。`mail.muselora.jp` の A／AAAA／CNAME も**存在しない**（`cloud-mail` のカスタムドメインと競合しない）。`cf2024-1._domainkey`・`_dmarc` もなく、Email Routing は未有効です。Email Routing の既存ルールは、権限の都合で読めていません（有効でないため、無いはずです）。
+- すでに別の MX（Google Workspace など）がある場合は、Email Routing と同時には使えません（現在は該当なし）。
 - 有効化の直後は、**ルールのないアドレス宛のメールは「Address does not exist」で拒否**され、送信者に再試行されません。**ルールを先に作ってから**（または直後に）有効化します。
 - ルール：Email Routing → Routing rules → **Catch-all**（または `contact@muselora.jp` のアドレス）→ Action **Send to a Worker** → `cloud-mail` → Save。
 - cloud-mail は、**アカウントのあるアドレス宛だけ**を受け付ける（初期値：宛先なしは拒否）。`ADMIN` のアドレスのアカウントが、§3 で作られていること。
 - 受信テスト：別のメール（Gmail など）から `contact@muselora.jp` に送り、`https://mail.muselora.jp/` の受信箱に届くことを確認。**これが確認できるまで、`data/site/operator.json` には、この連絡先を入れない**（art-atlas-japan 側の方針）。
 - 添付は、R2 未設定のため KV に保存される（小さい添付のみ想定）。送信（返信）には、別途 Resend 等の設定が必要で、**受信だけなら不要**。
 
-### 4-2. `contact@muselora.jp` の受信箱を作る
+### 4-2. `contact@muselora.jp` の受信箱を作る（`ADMIN` が `admin@muselora.jp` の場合。公開登録は開かない）
 
-cloud-mail は、**アカウント（受信箱）のあるアドレス宛のメールだけ**を保存します（初期値：宛先なしは拒否）。
-1. **`ADMIN` が `contact@muselora.jp` の場合**：§3 の管理者登録で、そのアドレスの受信箱が**自動で作られる**（追加の作業なし）。
-2. **`ADMIN` が別のアドレスの場合**：管理者でログイン（`https://mail.muselora.jp/`）→ アカウント（メールアドレス）の追加の画面で `contact@muselora.jp` を追加（画面の名称は版により異なる）。権限のあるのは管理者だけ。
-3. Email Routing のルール（§4）：**Send to a Worker → `cloud-mail`**。`contact@muselora.jp` だけを対象にする（個別アドレスのルール）か、Catch-all にする。Catch-all にしても、受信箱のないアドレス宛は cloud-mail が拒否するため、迷惑メールが溜まりにくい（拒否の通知は送信者に返る）。
-4. **受信テスト**：別のメール（Gmail など）から、`contact@muselora.jp` に件名つきで送る → `mail.muselora.jp` の受信箱に届くことを確認。届かないとき：(a) Email Routing の MX が有効か（DNS 画面）、(b) ルールが有効（Active）か、(c) Worker `cloud-mail` が選ばれているか、(d) 受信箱（アカウント）が存在するか、(e) 管理画面の設定で「受信」が閉になっていないか、の順に確認。
+cloud-mail は、**アカウント（受信箱）のあるアドレス宛のメールだけ**を保存します（初期値：宛先なしは拒否）。`contact@muselora.jp` は、**管理者のアカウントに追加する**形で作ります（ソースで確認：`POST /account/add` は、ログイン済みのユーザーが、自分のユーザーに別のアドレスを追加する機能で、**公開の新規登録とは別**。ログインが必要で、アドレスのドメインが `DOMAIN` に含まれることを検査する）。
+1. §3 で `admin@muselora.jp` を登録し、`https://mail.muselora.jp/` に**管理者でログイン**する。
+2. アカウント（メールアドレス）の追加の画面で、**`contact@muselora.jp`** を追加する（画面の名称は版により異なる）。**公開の新規登録（設定の「登録」）は開かない**（閉のまま）。
+   - 追加できないとき（「アカウントの追加が無効」）は、設定画面で「アカウントの追加」と「複数アカウント」が**有効**になっているかを確認（新規データベースの初期値は、どちらも有効）。追加の認証（Turnstile）は、初期値で無効。
+3. Email Routing のルール（§4）：**`contact@muselora.jp` → Send to a Worker → `cloud-mail`**。Catch-all は有効にしない（`contact@` だけを受ける）。
+4. **受信テスト**：別のメール（Gmail など）から `contact@muselora.jp` に件名つきで送る → 管理者でログインした受信箱の、`contact@muselora.jp` のアカウントに届くことを確認。届かないとき：(a) Email Routing の MX が有効か（DNS 画面）、(b) ルールが Active か、(c) Worker `cloud-mail` が選ばれているか、(d) `contact@muselora.jp` のアカウントが存在するか、(e) 設定で「受信」が閉になっていないか、の順に確認。
 5. **これが確認できるまで、MUSELORA の `operator.json` に連絡先を入れない。** 確認できたら、その旨を伝えてください（私が `operator.json` の PR を作ります）。
 
 ## 5. ロールバック
