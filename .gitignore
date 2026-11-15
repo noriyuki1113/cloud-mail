@@ -26,3 +26,8 @@ mail-vue/dist
 .wrangler
 .venv
 git-tools.js
+
+# Local/CI secret files must never be committed
+.dev.vars
+.dev.vars.*
+*.secrets.json

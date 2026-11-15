@@ -1,14 +1,18 @@
 import settingService from '../service/setting-service';
 import emailUtils from '../utils/email-utils';
+import { bearerToken, secretMatches } from '../utils/secret-utils';
 import {emailConst} from "../const/entity-const";
 
 const dbInit = {
 	async init(c) {
 
-		const secret = c.req.param('secret');
+		// POST /api/init with "Authorization: Bearer <jwt_secret>". The secret is never accepted in the URL
+		// (URLs end up in access logs) and is never logged; failures are a plain 401.
+		const provided = bearerToken(c.req.header('authorization'));
 
-		if (secret !== c.env.jwt_secret) {
-			return c.text('❌ JWT secret mismatch');
+		if (!(await secretMatches(provided, c.env.jwt_secret))) {
+			console.warn(c.env.jwt_secret ? 'init: unauthorized request' : 'init: the jwt_secret binding is not configured');
+			return c.text('Unauthorized', 401, { 'cache-control': 'no-store', 'www-authenticate': 'Bearer' });
 		}
 
 		await this.intDB(c);
