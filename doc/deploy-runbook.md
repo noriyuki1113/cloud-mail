@@ -96,6 +96,15 @@ PR #2 は Draft のままで、`main` が `de05033`、PR の先端が `04985fa` 
 - 受信テスト：別のメール（Gmail など）から `contact@muselora.jp` に送り、`https://mail.muselora.jp/` の受信箱に届くことを確認。**これが確認できるまで、`data/site/operator.json` には、この連絡先を入れない**（art-atlas-japan 側の方針）。
 - 添付は、R2 未設定のため KV に保存される（小さい添付のみ想定）。送信（返信）には、別途 Resend 等の設定が必要で、**受信だけなら不要**。
 
+### 4-2. `contact@muselora.jp` の受信箱を作る
+
+cloud-mail は、**アカウント（受信箱）のあるアドレス宛のメールだけ**を保存します（初期値：宛先なしは拒否）。
+1. **`ADMIN` が `contact@muselora.jp` の場合**：§3 の管理者登録で、そのアドレスの受信箱が**自動で作られる**（追加の作業なし）。
+2. **`ADMIN` が別のアドレスの場合**：管理者でログイン（`https://mail.muselora.jp/`）→ アカウント（メールアドレス）の追加の画面で `contact@muselora.jp` を追加（画面の名称は版により異なる）。権限のあるのは管理者だけ。
+3. Email Routing のルール（§4）：**Send to a Worker → `cloud-mail`**。`contact@muselora.jp` だけを対象にする（個別アドレスのルール）か、Catch-all にする。Catch-all にしても、受信箱のないアドレス宛は cloud-mail が拒否するため、迷惑メールが溜まりにくい（拒否の通知は送信者に返る）。
+4. **受信テスト**：別のメール（Gmail など）から、`contact@muselora.jp` に件名つきで送る → `mail.muselora.jp` の受信箱に届くことを確認。届かないとき：(a) Email Routing の MX が有効か（DNS 画面）、(b) ルールが有効（Active）か、(c) Worker `cloud-mail` が選ばれているか、(d) 受信箱（アカウント）が存在するか、(e) 管理画面の設定で「受信」が閉になっていないか、の順に確認。
+5. **これが確認できるまで、MUSELORA の `operator.json` に連絡先を入れない。** 確認できたら、その旨を伝えてください（私が `operator.json` の PR を作ります）。
+
 ## 5. ロールバック
 
 | 何を戻すか | 方法 |
