@@ -38,6 +38,7 @@ jobs:
       ADMIN: ${{ secrets.ADMIN || vars.ADMIN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || vars.CLOUDFLARE_ACCOUNT_ID }}
       D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID || vars.D1_DATABASE_ID }}
+      D1_DATABASE_NAME: ${{ vars.D1_DATABASE_NAME || 'muselora-mail' }}
       KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID || vars.KV_NAMESPACE_ID }}
       R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME || vars.R2_BUCKET_NAME }}
       PROJECT_LINK: ${{ secrets.PROJECT_LINK || vars.PROJECT_LINK }}
@@ -64,11 +65,23 @@ jobs:
         with:
           node-version: "24"
           cache: "pnpm"
-          cache-dependency-path: "./mail-worker/pnpm-lock.yaml"
+          cache-dependency-path: |
+            ./mail-worker/pnpm-lock.yaml
+            ./mail-vue/pnpm-lock.yaml
 
       - name: 📦 Install dependencies
         run: pnpm install --frozen-lockfile
         working-directory: ./mail-worker
+
+      # The front end is built in its own step. It runs BEFORE any Cloudflare credential or the JWT secret is
+      # attached to a step, so dependency install scripts and the build never see them. Output: mail-worker/dist
+      # (VITE_OUT_DIR in mail-vue/.env.release). `wrangler deploy` does not build again (no [build] in the config).
+      - name: 🎨 Build front end (no credentials)
+        run: |
+          pnpm -C ./mail-vue install --frozen-lockfile
+          pnpm -C ./mail-vue run build
+          test -f ./mail-worker/dist/index.html || { echo "❌ Front end build output ./mail-worker/dist/index.html is missing."; exit 1; }
+          echo "✅ Front end built."
 
       - name: 📡 Disable wrangler telemetry
         working-directory: ./mail-worker
@@ -141,7 +154,18 @@ jobs:
           EOF
           fi
 
+          if grep -q '^\[build\]' "$CONFIG_FILE"; then
+            echo "❌ $CONFIG_FILE must not contain a [build] section (the front end is built in a separate step)."
+            exit 1
+          fi
+
+          if ! grep -Eq '^[A-Za-z0-9._-]{1,64}$' <<< "$D1_DATABASE_NAME"; then
+            echo "❌ D1_DATABASE_NAME is not a valid database name."
+            exit 1
+          fi
+
           sed -i "s|\${NAME}|${NAME}|g" "$CONFIG_FILE"
+          sed -i "s|\${D1_DATABASE_NAME}|${D1_DATABASE_NAME}|g" "$CONFIG_FILE"
           sed -i "s|\${CUSTOM_DOMAIN}|${CUSTOM_DOMAIN}|g" "$CONFIG_FILE"
           sed -i "s|\"\${DOMAIN}\"|${DOMAIN}|g" "$CONFIG_FILE"
           sed -i "s|\${ADMIN}|${ADMIN}|g" "$CONFIG_FILE"
@@ -163,13 +187,7 @@ jobs:
           
           CONFIG_FILE="wrangler-action.toml"
           
-          if [ -n "$KV_NAMESPACE_ID" ]; then
-            sed -i "s|\${KV_NAMESPACE_ID}|${KV_NAMESPACE_ID}|g" "$CONFIG_FILE"
-            echo "✅ Using the database from environment variables."
-            exit 0
-          fi
-          
-          echo "🔍 Checking if the database exists..."
+          echo "🔍 Checking the existing KV namespaces..."
           
           set +e
             KV_LIST=$(pnpm wrangler kv namespace list 2>&1)
@@ -179,6 +197,16 @@ jobs:
           if [ $STATUS -ne 0 ]; then
             echo "$KV_LIST"
             exit 1
+          fi
+
+          if [ -n "$KV_NAMESPACE_ID" ]; then
+            if ! echo "$KV_LIST" | jq -e --arg id "$KV_NAMESPACE_ID" '.[] | select(.id == $id)' >/dev/null; then
+              echo "❌ KV_NAMESPACE_ID does not match any KV namespace in this account."
+              exit 1
+            fi
+            sed -i "s|\${KV_NAMESPACE_ID}|${KV_NAMESPACE_ID}|g" "$CONFIG_FILE"
+            echo "✅ Using the KV namespace from the KV_NAMESPACE_ID variable."
+            exit 0
           fi
                   
           if echo "$KV_LIST" | jq -e ".[] | select(.title == \"$NAME\")" >/dev/null; then
@@ -207,15 +235,8 @@ jobs:
         run: |
           
           CONFIG_FILE="wrangler-action.toml"
-          
-          if [ -n "$D1_DATABASE_ID" ]; then
-            sed -i "s|\${D1_DATABASE_ID}|${D1_DATABASE_ID}|g" "$CONFIG_FILE"
-            echo "✅ Using the database from environment variables."
-            exit 0
-          fi
-          
-          echo "🔍 Checking if the database exists..."
-          
+
+          echo "🔍 Looking for the existing D1 database '$D1_DATABASE_NAME'..."
           set +e
             DB_LIST=$(pnpm wrangler d1 list --json 2>&1)
             STATUS=$?
@@ -225,23 +246,40 @@ jobs:
             echo "$DB_LIST"
             exit 1
           fi
-          
-          if echo "$DB_LIST" | jq -e ".[] | select(.name == \"$NAME\")" >/dev/null; then
-            echo "✅ Database $NAME already exists."
-            D1_ID=$(echo "$DB_LIST" | jq -r ".[] | select(.name == \"$NAME\") | .uuid")
-            echo "D1_DATABASE_ID: $D1_ID"
+
+          D1_ID=$(echo "$DB_LIST" | jq -r --arg n "$D1_DATABASE_NAME" '[.[] | select(.name == $n)][0].uuid // empty')
+
+          if [ -n "$D1_DATABASE_ID" ]; then
+            # An explicit id must be a database that exists (and, if the name is also found, the same one).
+            if ! echo "$DB_LIST" | jq -e --arg id "$D1_DATABASE_ID" '.[] | select(.uuid == $id)' >/dev/null; then
+              echo "❌ D1_DATABASE_ID does not match any database in this account."
+              exit 1
+            fi
+            if [ -n "$D1_ID" ] && [ "$D1_ID" != "$D1_DATABASE_ID" ]; then
+              echo "❌ D1_DATABASE_ID differs from the id of '$D1_DATABASE_NAME'. Fix the variable or D1_DATABASE_NAME."
+              exit 1
+            fi
+            D1_ID="$D1_DATABASE_ID"
+            echo "✅ Using the database id from the D1_DATABASE_ID variable."
+          elif [ -n "$D1_ID" ]; then
+            echo "✅ Reusing the existing database '$D1_DATABASE_NAME'."
           else
             if [ "$CREATE_MISSING" != "true" ]; then
-              echo "❌ D1 database '$NAME' was not found. Set the D1_DATABASE_ID variable to the existing database id,"
+              echo "❌ D1 database '$D1_DATABASE_NAME' was not found. Set D1_DATABASE_NAME / D1_DATABASE_ID to the existing database,"
               echo "   or re-run with 'create_missing_resources' enabled to create a new one."
               exit 1
             fi
-            echo "⚠️ D1 database $NAME does not exist. Creating it (create_missing_resources=true)..."
-            pnpm wrangler d1 create $NAME
+            echo "⚠️ D1 database $D1_DATABASE_NAME does not exist. Creating it (create_missing_resources=true)..."
+            pnpm wrangler d1 create "$D1_DATABASE_NAME"
             DB_LIST=$(pnpm wrangler d1 list --json)
-            D1_ID=$(echo "$DB_LIST" | jq -r ".[] | select(.name == \"$NAME\") | .uuid")
+            D1_ID=$(echo "$DB_LIST" | jq -r --arg n "$D1_DATABASE_NAME" '[.[] | select(.name == $n)][0].uuid // empty')
           fi
-          
+
+          if ! grep -Eq '^[0-9a-f-]{36}$' <<< "$D1_ID"; then
+            echo "❌ Could not determine the D1 database id."
+            exit 1
+          fi
+
           sed -i "s|\${D1_DATABASE_ID}|$D1_ID|g" "$CONFIG_FILE"
           echo "✅ Setup completed."
 

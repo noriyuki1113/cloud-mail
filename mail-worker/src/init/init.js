@@ -701,11 +701,13 @@ const dbInit = {
 		`).run();
 
 		try {
+			// register = 1 (CLOSED): a fresh installation does not accept public sign-ups until the administrator
+			// opens registration in the settings page.
 			await c.env.db.prepare(`
 			  INSERT INTO setting (
 				register, receive, add_email, many_email, title, auto_refresh, register_verify, add_email_verify
 			  )
-			  SELECT 0, 0, 0, 0, 'Cloud Mail', 0, 1, 1
+			  SELECT 1, 0, 0, 0, 'Cloud Mail', 0, 1, 1
 			  WHERE NOT EXISTS (SELECT 1 FROM setting)
 			`).run();
 		} catch (e) {
